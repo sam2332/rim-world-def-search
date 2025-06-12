@@ -11,6 +11,17 @@
 			"problemMatcher": [
 				"$tsc"
 			]
+		},
+		{
+			"type": "shell",
+			"label": "Test Search (autoTest)",
+			"command": "tsc && node build/autoTest.js",
+			"windows": {
+				"command": "tsc; node build/autoTest.js"
+			},
+			"group": "test",
+			"isBackground": false,
+			"problemMatcher": []
 		}
 	]
 }

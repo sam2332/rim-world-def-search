@@ -7,3 +7,10 @@ you will help me make a searching tool to find rimworld def files in core and mo
 
 # Take Actions Automatically, do not wait for me to say "go" or "continue"
 # Do not ask me questions, just do what I say
+
+# Testing 
+There is a task to test the code, do not ask me to test it, just do it
+
+# Compiling
+There is a task to compile the code, do not ask me to compile it, just do it
+

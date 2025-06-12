@@ -16,11 +16,11 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const index_js_1 = require("@modelcontextprotocol/sdk/server/index.js");
 const stdio_js_1 = require("@modelcontextprotocol/sdk/server/stdio.js");
 const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
+const fileIndex_1 = require("./utils/fileIndex");
+const searchXml_1 = require("./utils/searchXml");
 const fs_1 = __importDefault(require("fs"));
-const path_1 = __importDefault(require("path"));
 const zod_1 = require("zod");
-const fast_xml_parser_1 = require("fast-xml-parser");
-// Define reusable schemas
+const zod_to_json_schema_1 = require("zod-to-json-schema");
 const SearchRequestSchema = zod_1.z.object({
     searchTerm: zod_1.z.string(),
     limit: zod_1.z.number().optional().default(5).refine((val) => val >= 1 && val <= 50, {
@@ -30,7 +30,6 @@ const SearchRequestSchema = zod_1.z.object({
 const GetFullXmlRequestSchema = zod_1.z.object({
     filePath: zod_1.z.string(),
 });
-// Replace hard-coded paths with configuration
 const config = {
     directories: [
         process.env.RIMWORLD_CORE || 'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Core/Defs',
@@ -42,9 +41,6 @@ const config = {
 class RimWorldDefSearchServer {
     constructor() {
         this.indexedData = [];
-        // initialize parser + builder with attributes preserved
-        this.parser = new fast_xml_parser_1.XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
-        this.builder = new fast_xml_parser_1.XMLBuilder({ ignoreAttributes: false, attributeNamePrefix: '@_' });
         this.server = new index_js_1.Server({
             name: 'rimworld-def-search',
             version: '0.1.0',
@@ -53,35 +49,13 @@ class RimWorldDefSearchServer {
                 tools: {},
             },
         });
-        this.indexFiles(); // Index files during startup
+        this.indexedData = (0, fileIndex_1.indexXmlFiles)(config.directories);
         this.setupToolHandlers();
         this.server.onerror = (error) => console.error('[MCP Error]', error);
         process.on('SIGINT', () => __awaiter(this, void 0, void 0, function* () {
             yield this.server.close();
             process.exit(0);
         }));
-    }
-    indexFiles() {
-        return __awaiter(this, void 0, void 0, function* () {
-            const directories = config.directories;
-            const indexDirectory = (directory) => {
-                const files = fs_1.default.existsSync(directory) ? fs_1.default.readdirSync(directory) : [];
-                for (const file of files) {
-                    const filePath = path_1.default.join(directory, file);
-                    if (fs_1.default.existsSync(filePath) && fs_1.default.statSync(filePath).isDirectory()) {
-                        indexDirectory(filePath); // Recursive call for subdirectories
-                    }
-                    else if (fs_1.default.existsSync(filePath) && fs_1.default.statSync(filePath).isFile() && file.endsWith('.xml')) {
-                        const content = fs_1.default.readFileSync(filePath, 'utf-8');
-                        this.indexedData.push({ file: `${filePath}`, content, relevance: 0 });
-                    }
-                }
-            };
-            for (const directory of directories) {
-                indexDirectory(directory);
-            }
-            console.log(`Indexed ${this.indexedData.length} files.`);
-        });
     }
     setupToolHandlers() {
         this.server.setRequestHandler(types_js_1.ListToolsRequestSchema, () => __awaiter(this, void 0, void 0, function* () {
@@ -90,12 +64,12 @@ class RimWorldDefSearchServer {
                     {
                         name: 'search',
                         description: 'Search RimWorld Def files for specific terms',
-                        inputSchema: SearchRequestSchema,
+                        inputSchema: (0, zod_to_json_schema_1.zodToJsonSchema)(SearchRequestSchema),
                     },
                     {
                         name: 'getFullXml',
                         description: 'Retrieve the full XML content of a file',
-                        inputSchema: GetFullXmlRequestSchema,
+                        inputSchema: (0, zod_to_json_schema_1.zodToJsonSchema)(GetFullXmlRequestSchema),
                     },
                 ],
             });
@@ -124,7 +98,7 @@ class RimWorldDefSearchServer {
                     throw new types_js_1.McpError(types_js_1.ErrorCode.InvalidParams, parsedArgs.error.message);
                 }
                 const { searchTerm, limit } = parsedArgs.data;
-                const results = yield this.performSearch(searchTerm);
+                const results = yield (0, searchXml_1.performSearch)(this.indexedData, searchTerm);
                 return {
                     content: [
                         {
@@ -136,147 +110,6 @@ class RimWorldDefSearchServer {
             }
             throw new types_js_1.McpError(types_js_1.ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`);
         }));
-    }
-    // Extracts the full parent DOM tree containing the search term
-    extractFullParentTree(xml, searchTerm) {
-        const lowerXml = xml.toLowerCase();
-        const lowerTerm = searchTerm.toLowerCase();
-        let idx = lowerXml.indexOf(lowerTerm);
-        if (idx === -1)
-            return null;
-        // Find all parent nodes leading up to the root
-        const openTags = [];
-        const closeTags = [];
-        let pos = idx;
-        while (pos >= 0) {
-            const openTagMatch = lowerXml.lastIndexOf('<', pos);
-            const closeTagMatch = lowerXml.indexOf('>', openTagMatch);
-            if (openTagMatch !== -1 && closeTagMatch !== -1) {
-                const tag = xml.substring(openTagMatch + 1, closeTagMatch).split(' ')[0];
-                if (!tag.startsWith('/')) {
-                    openTags.push(tag);
-                }
-                else {
-                    closeTags.push(tag.substring(1));
-                }
-            }
-            pos = openTagMatch - 1;
-        }
-        // Build the full parent tree
-        const parentTree = openTags.reverse().map(tag => `<${tag}>`).join('') +
-            xml.substring(idx, xml.indexOf('</', idx) + closeTags.length) +
-            closeTags.map(tag => `</${tag}>`).join('');
-        return parentTree;
-    }
-    formatXml(xml) {
-        const formattedXml = xml
-            .replace(/>(\s*)</g, '>\n<') // Add newlines between tags
-            .replace(/\s+\n/g, '\n') // Remove excess whitespace before newlines
-            .replace(/\n\s+/g, '\n') // Remove excess whitespace after newlines
-            .replace(/\n{2,}/g, '\n') // Remove multiple consecutive newlines
-            .trim();
-        return formattedXml;
-    }
-    performSearch(searchTerm) {
-        return __awaiter(this, void 0, void 0, function* () {
-            const lowerTerm = searchTerm.toLowerCase();
-            const results = [];
-            for (const data of this.indexedData) {
-                const jsonTree = this.parser.parse(data.content);
-                const nodes = this.findMatchingNodes(jsonTree, lowerTerm);
-                if (nodes.length) {
-                    const snippetXml = this.builder.build(nodes[0]);
-                    const formattedSnippetXml = this.formatXml(snippetXml);
-                    results.push({
-                        file: data.file,
-                        content: formattedSnippetXml,
-                        relevance: 1,
-                    });
-                }
-            }
-            return results;
-        });
-    }
-    // Recursively collect any object-nodes whose text or attribute values include term
-    findMatchingNodes(obj, term) {
-        const matches = [];
-        const recurse = (node) => {
-            if (node && typeof node === 'object') {
-                // check attributes
-                for (const key of Object.keys(node)) {
-                    if (key.startsWith('@_') && String(node[key]).toLowerCase().includes(term)) {
-                        matches.push(node);
-                        break;
-                    }
-                }
-                // check text values or nested objects
-                for (const [k, v] of Object.entries(node)) {
-                    if (typeof v === 'string' && v.toLowerCase().includes(term)) {
-                        matches.push(node);
-                        break;
-                    }
-                }
-                // dive deeper
-                for (const child of Object.values(node)) {
-                    recurse(child);
-                }
-            }
-        };
-        recurse(obj);
-        return matches;
-    }
-    // Helper to find nodes matching the search term
-    findNodes(tree, term) {
-        const nodes = [];
-        const traverse = (node, parentKey = '') => {
-            if (typeof node === 'object') {
-                for (const key in node) {
-                    if (key.includes(term) || (typeof node[key] === 'string' && node[key].includes(term))) {
-                        nodes.push(`${parentKey}/${key}`);
-                    }
-                    traverse(node[key], key);
-                }
-            }
-        };
-        traverse(tree);
-        return nodes;
-    }
-    // Helper to get parent node
-    getParentNode(tree, node) {
-        const traverse = (currentNode, parentNode) => {
-            if (typeof currentNode === 'object') {
-                for (const key in currentNode) {
-                    if (key === node) {
-                        return parentNode;
-                    }
-                    const result = traverse(currentNode[key], key);
-                    if (result)
-                        return result;
-                }
-            }
-            return '';
-        };
-        return traverse(tree, '');
-    }
-    // Build an in-RAM tree or minimal index of nodes
-    buildXmlIndex(directory) {
-        return __awaiter(this, void 0, void 0, function* () {
-            const index = {};
-            const files = fs_1.default.existsSync(directory) ? fs_1.default.readdirSync(directory) : [];
-            for (const file of files) {
-                const filePath = path_1.default.join(directory, file);
-                if (fs_1.default.existsSync(filePath) && fs_1.default.statSync(filePath).isDirectory()) {
-                    const subIndex = yield this.buildXmlIndex(filePath);
-                    Object.assign(index, subIndex); // Merge subdirectory index
-                }
-                else if (fs_1.default.existsSync(filePath) && fs_1.default.statSync(filePath).isFile() && file.endsWith('.xml')) {
-                    const content = fs_1.default.readFileSync(filePath, 'utf-8');
-                    const parsedXml = this.parser.parse(content);
-                    index[filePath] = parsedXml; // Store parsed XML tree
-                }
-            }
-            return index;
-        });
     }
     run() {
         return __awaiter(this, void 0, void 0, function* () {
