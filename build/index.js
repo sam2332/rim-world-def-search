@@ -53,10 +53,26 @@ const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const fuzzy = __importStar(require("fuzzy"));
 const net_1 = __importDefault(require("net"));
-const isValidSearchArgs = (args) => typeof args === 'object' &&
-    args !== null &&
-    typeof args.searchTerm === 'string' &&
-    (args.limit === undefined || (typeof args.limit === 'number' && args.limit >= 1 && args.limit <= 50));
+const zod_1 = require("zod");
+// Define reusable schemas
+const SearchRequestSchema = zod_1.z.object({
+    searchTerm: zod_1.z.string(),
+    limit: zod_1.z.number().optional().default(5).refine((val) => val >= 1 && val <= 50, {
+        message: 'Limit must be between 1 and 50',
+    }),
+});
+const GetFullXmlRequestSchema = zod_1.z.object({
+    filePath: zod_1.z.string(),
+});
+// Replace hard-coded paths with configuration
+const config = {
+    directories: [
+        process.env.RIMWORLD_CORE || 'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Core/Defs',
+        process.env.RIMWORLD_ROYALTY || 'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Royalty/Defs',
+        process.env.RIMWORLD_IDEOLOGY || 'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Ideology/Defs',
+        process.env.RIMWORLD_BIOTECH || 'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Biotech/Defs',
+    ],
+};
 class RimWorldDefSearchServer {
     constructor() {
         this.indexedData = [];
@@ -78,12 +94,7 @@ class RimWorldDefSearchServer {
     }
     indexFiles() {
         return __awaiter(this, void 0, void 0, function* () {
-            const directories = [
-                'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Core/Defs',
-                'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Royalty/Defs',
-                'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Ideology/Defs',
-                'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Biotech/Defs',
-            ];
+            const directories = config.directories;
             const indexDirectory = (directory) => {
                 const files = fs_1.default.existsSync(directory) ? fs_1.default.readdirSync(directory) : [];
                 for (const file of files) {
@@ -110,35 +121,40 @@ class RimWorldDefSearchServer {
                     {
                         name: 'search',
                         description: 'Search RimWorld Def files for specific terms',
-                        inputSchema: {
-                            type: 'object',
-                            properties: {
-                                searchTerm: {
-                                    type: 'string',
-                                    description: 'Search term to look for in XML files',
-                                },
-                                limit: {
-                                    type: 'number',
-                                    description: 'Maximum number of results to return (default: 5)',
-                                    minimum: 1,
-                                    maximum: 50,
-                                },
-                            },
-                            required: ['searchTerm'],
-                        },
+                        inputSchema: SearchRequestSchema,
+                    },
+                    {
+                        name: 'getFullXml',
+                        description: 'Retrieve the full XML content of a file',
+                        inputSchema: GetFullXmlRequestSchema,
                     },
                 ],
             });
         }));
         this.server.setRequestHandler(types_js_1.CallToolRequestSchema, (request) => __awaiter(this, void 0, void 0, function* () {
-            if (request.params.name !== 'search') {
-                throw new types_js_1.McpError(types_js_1.ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`);
+            if (request.params.name === 'getFullXml') {
+                const args = request.params.arguments;
+                const { filePath } = args;
+                if (!fs_1.default.existsSync(filePath)) {
+                    throw new types_js_1.McpError(types_js_1.ErrorCode.InvalidParams, `File not found: ${filePath}`);
+                }
+                const content = fs_1.default.readFileSync(filePath, 'utf-8');
+                const result = { file: filePath, content, relevance: 0 };
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify(result, null, 2),
+                        },
+                    ],
+                };
             }
-            if (!isValidSearchArgs(request.params.arguments)) {
-                throw new types_js_1.McpError(types_js_1.ErrorCode.InvalidParams, 'Invalid search arguments');
-            }
-            const { searchTerm, limit = 5 } = request.params.arguments;
-            try {
+            if (request.params.name === 'search') {
+                const parsedArgs = SearchRequestSchema.safeParse(request.params.arguments);
+                if (!parsedArgs.success) {
+                    throw new types_js_1.McpError(types_js_1.ErrorCode.InvalidParams, parsedArgs.error.message);
+                }
+                const { searchTerm, limit } = parsedArgs.data;
                 const results = yield this.performSearch(searchTerm);
                 return {
                     content: [
@@ -149,20 +165,7 @@ class RimWorldDefSearchServer {
                     ],
                 };
             }
-            catch (error) {
-                if (error instanceof types_js_1.McpError) {
-                    return {
-                        content: [
-                            {
-                                type: 'text',
-                                text: `Search error: ${error.message}`,
-                            },
-                        ],
-                        isError: true,
-                    };
-                }
-                throw error;
-            }
+            throw new types_js_1.McpError(types_js_1.ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`);
         }));
     }
     performSearch(searchTerm) {

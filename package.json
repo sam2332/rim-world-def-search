@@ -7,7 +7,7 @@
     "build": "tsc",
     "watch": "tsc --watch",
     "start": "node index.js",
-    "inspector": "npx @modelcontextprotocol/inspector build/index.js"
+    "inspector": "npm run @modelcontextprotocol/inspector build/index.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

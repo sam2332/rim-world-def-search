@@ -11,6 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import * as fuzzy from 'fuzzy';
 import net from 'net';
+import { z } from 'zod';
 
 interface SearchResult {
   file: string;
@@ -18,17 +19,28 @@ interface SearchResult {
   relevance: number; // Added relevance property for ranking
 }
 
-const isValidSearchArgs = (args: any): args is { searchTerm: string; limit?: number } =>
-  typeof args === 'object' &&
-  args !== null &&
-  typeof args.searchTerm === 'string' &&
-  (args.limit === undefined || (typeof args.limit === 'number' && args.limit >= 1 && args.limit <= 50));
-const isValidGetFullXmlArgs = (args: any): args is { filePath: string } =>
-  typeof args === 'object' &&
-  args !== null &&
-  typeof args.filePath === 'string' &&
-  fs.existsSync(args.filePath) && fs.statSync(args.filePath).isFile();
-  
+// Define reusable schemas
+const SearchRequestSchema = z.object({
+  searchTerm: z.string(),
+  limit: z.number().optional().default(5).refine((val) => val >= 1 && val <= 50, {
+    message: 'Limit must be between 1 and 50',
+  }),
+});
+
+const GetFullXmlRequestSchema = z.object({
+  filePath: z.string(),
+});
+
+// Replace hard-coded paths with configuration
+const config = {
+  directories: [
+    process.env.RIMWORLD_CORE || 'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Core/Defs',
+    process.env.RIMWORLD_ROYALTY || 'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Royalty/Defs',
+    process.env.RIMWORLD_IDEOLOGY || 'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Ideology/Defs',
+    process.env.RIMWORLD_BIOTECH || 'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Biotech/Defs',
+  ],
+};
+
 class RimWorldDefSearchServer {
   private server: Server;
   private indexedData: SearchResult[] = [];
@@ -57,12 +69,7 @@ class RimWorldDefSearchServer {
   }
 
   private async indexFiles() {
-    const directories = [
-      'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Core/Defs',
-      'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Royalty/Defs',
-      'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Ideology/Defs',
-      'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Biotech/Defs',
-    ];
+    const directories = config.directories;
 
     const indexDirectory = (directory: string) => {
       const files = fs.existsSync(directory) ? fs.readdirSync(directory) : [];
@@ -92,36 +99,12 @@ class RimWorldDefSearchServer {
         {
           name: 'search',
           description: 'Search RimWorld Def files for specific terms',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              searchTerm: {
-                type: 'string',
-                description: 'Search term to look for in XML files',
-              },
-              limit: {
-                type: 'number',
-                description: 'Maximum number of results to return (default: 5)',
-                minimum: 1,
-                maximum: 50,
-              },
-            },
-            required: ['searchTerm'],
-          },
+          inputSchema: SearchRequestSchema,
         },
         {
           name: 'getFullXml',
           description: 'Retrieve the full XML content of a file',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              filePath: {
-                type: 'string',
-                description: 'Path to the XML file',
-              },
-            },
-            required: ['filePath'],
-          },
+          inputSchema: GetFullXmlRequestSchema,
         },
       ],
     }));
@@ -148,23 +131,15 @@ class RimWorldDefSearchServer {
         };
       }
 
-      if (request.params.name !== 'search') {
-        throw new McpError(
-          ErrorCode.MethodNotFound,
-          `Unknown tool: ${request.params.name}`
-        );
-      }
+      if (request.params.name === 'search') {
+        const parsedArgs = SearchRequestSchema.safeParse(request.params.arguments);
 
-      if (!isValidSearchArgs(request.params.arguments)) {
-        throw new McpError(
-          ErrorCode.InvalidParams,
-          'Invalid search arguments'
-        );
-      }
+        if (!parsedArgs.success) {
+          throw new McpError(ErrorCode.InvalidParams, parsedArgs.error.message);
+        }
 
-      const { searchTerm, limit = 5 } = request.params.arguments;
+        const { searchTerm, limit } = parsedArgs.data;
 
-      try {
         const results = await this.performSearch(searchTerm);
         return {
           content: [
@@ -174,20 +149,12 @@ class RimWorldDefSearchServer {
             },
           ],
         };
-      } catch (error) {
-        if (error instanceof McpError) {
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `Search error: ${error.message}`,
-              },
-            ],
-            isError: true,
-          };
-        }
-        throw error;
       }
+
+      throw new McpError(
+        ErrorCode.MethodNotFound,
+        `Unknown tool: ${request.params.name}`
+      );
     });
   }
   private async performSearch(searchTerm: string): Promise<SearchResult[]> {
@@ -230,24 +197,11 @@ class RimWorldDefSearchServer {
     return results.sort((a, b) => b.relevance - a.relevance);
   }
 
-  private async findAvailablePort(startPort: number): Promise<number> {
-    return new Promise((resolve) => {
-      const server = net.createServer();
-      server.listen(startPort, () => {
-        server.close(() => resolve(startPort));
-      });
-      server.on('error', () => {
-        resolve(this.findAvailablePort(startPort + 1));
-      });
-    });
-  }
 
   async run() {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
 
-    const port = await this.findAvailablePort(3000);
-    console.error(`RimWorld Def Search MCP server running on port ${port}`);
   }
 }
 
