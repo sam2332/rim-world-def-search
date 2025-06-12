@@ -78,25 +78,12 @@ class RimWorldDefSearchServer {
     }
     indexFiles() {
         return __awaiter(this, void 0, void 0, function* () {
-            const dlcDirectories = [
+            const directories = [
                 'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Core/Defs',
                 'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Royalty/Defs',
                 'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Ideology/Defs',
                 'C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Data/Biotech/Defs',
             ];
-            const steamWorkshopMods = fs_1.default.existsSync('C:/Program Files (x86)/Steam/steamapps/workshop/content/294100')
-                ? fs_1.default
-                    .readdirSync('C:/Program Files (x86)/Steam/steamapps/workshop/content/294100', { withFileTypes: true })
-                    .filter((dirent) => dirent.isDirectory())
-                    .map((dirent) => path_1.default.join('C:/Program Files (x86)/Steam/steamapps/workshop/content/294100', dirent.name))
-                : [];
-            const manuallyInstalledMods = fs_1.default.existsSync('C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Mods')
-                ? fs_1.default
-                    .readdirSync('C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Mods', { withFileTypes: true })
-                    .filter((dirent) => dirent.isDirectory())
-                    .map((dirent) => path_1.default.join('C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Mods', dirent.name))
-                : [];
-            const directories = [...dlcDirectories, ...steamWorkshopMods, ...manuallyInstalledMods];
             const indexDirectory = (directory) => {
                 const files = fs_1.default.existsSync(directory) ? fs_1.default.readdirSync(directory) : [];
                 for (const file of files) {
@@ -180,13 +167,31 @@ class RimWorldDefSearchServer {
     }
     performSearch(searchTerm) {
         return __awaiter(this, void 0, void 0, function* () {
+            const searchTerms = searchTerm.split(' ').filter(term => term.trim() !== '');
             const results = this.indexedData
                 .map((data) => {
                 const lines = data.content.split('\n');
-                const matches = fuzzy.filter(searchTerm, lines);
-                if (matches.length > 0) {
-                    const relevance = matches.reduce((sum, match) => sum + match.score, 0) / matches.length;
-                    return Object.assign(Object.assign({}, data), { relevance });
+                let totalRelevance = 0;
+                let matchCount = 0;
+                const relatedTags = [];
+                for (const term of searchTerms) {
+                    const matches = fuzzy.filter(term, lines);
+                    if (matches.length > 0) {
+                        totalRelevance += matches.reduce((sum, match) => sum + match.score, 0) / matches.length;
+                        matchCount++;
+                        // Extract related XML tags for each match
+                        matches.forEach(match => {
+                            const lineIndex = match.index;
+                            const contextLines = lines.slice(Math.max(0, lineIndex - 5), Math.min(lines.length, lineIndex + 5));
+                            const xmlSnippet = contextLines.join('\n');
+                            relatedTags.push(xmlSnippet);
+                        });
+                    }
+                }
+                if (matchCount > 0) {
+                    const multiTermBoost = searchTerms.length > 1 ? (matchCount / searchTerms.length) : 1;
+                    const relevance = totalRelevance * multiTermBoost;
+                    return { file: data.file, content: relatedTags.join('\n'), relevance };
                 }
                 return null;
             })
