@@ -42,11 +42,9 @@ const config = {
 class RimWorldDefSearchServer {
     constructor() {
         this.indexedData = [];
-        // Initialize XML parser
-        this.parser = new fast_xml_parser_1.XMLParser({
-            ignoreAttributes: false,
-            attributeNamePrefix: '@_',
-        });
+        // initialize parser + builder with attributes preserved
+        this.parser = new fast_xml_parser_1.XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
+        this.builder = new fast_xml_parser_1.XMLBuilder({ ignoreAttributes: false, attributeNamePrefix: '@_' });
         this.server = new index_js_1.Server({
             name: 'rimworld-def-search',
             version: '0.1.0',
@@ -170,34 +168,62 @@ class RimWorldDefSearchServer {
             closeTags.map(tag => `</${tag}>`).join('');
         return parentTree;
     }
-    // Update performSearch to build a pseudo-tree
+    formatXml(xml) {
+        const formattedXml = xml
+            .replace(/>(\s*)</g, '>\n<') // Add newlines between tags
+            .replace(/\s+\n/g, '\n') // Remove excess whitespace before newlines
+            .replace(/\n\s+/g, '\n') // Remove excess whitespace after newlines
+            .replace(/\n{2,}/g, '\n') // Remove multiple consecutive newlines
+            .trim();
+        return formattedXml;
+    }
     performSearch(searchTerm) {
         return __awaiter(this, void 0, void 0, function* () {
-            const searchTerms = searchTerm.split(' ').filter(term => term.trim() !== '');
+            const lowerTerm = searchTerm.toLowerCase();
             const results = [];
             for (const data of this.indexedData) {
-                const lowerContent = data.content.toLowerCase();
-                let found = false;
-                let bestTree = '';
-                let bestPos = Infinity;
-                for (const term of searchTerms) {
-                    const idx = lowerContent.indexOf(term.toLowerCase());
-                    if (idx !== -1 && idx < bestPos) {
-                        // Try to extract the full parent DOM tree
-                        const tree = this.extractFullParentTree(data.content, term);
-                        if (tree) {
-                            found = true;
-                            bestTree = tree;
-                            bestPos = idx;
-                        }
-                    }
-                }
-                if (found && bestTree) {
-                    results.push({ file: data.file, content: bestTree, relevance: 1 });
+                const jsonTree = this.parser.parse(data.content);
+                const nodes = this.findMatchingNodes(jsonTree, lowerTerm);
+                if (nodes.length) {
+                    const snippetXml = this.builder.build(nodes[0]);
+                    const formattedSnippetXml = this.formatXml(snippetXml);
+                    results.push({
+                        file: data.file,
+                        content: formattedSnippetXml,
+                        relevance: 1,
+                    });
                 }
             }
             return results;
         });
+    }
+    // Recursively collect any object-nodes whose text or attribute values include term
+    findMatchingNodes(obj, term) {
+        const matches = [];
+        const recurse = (node) => {
+            if (node && typeof node === 'object') {
+                // check attributes
+                for (const key of Object.keys(node)) {
+                    if (key.startsWith('@_') && String(node[key]).toLowerCase().includes(term)) {
+                        matches.push(node);
+                        break;
+                    }
+                }
+                // check text values or nested objects
+                for (const [k, v] of Object.entries(node)) {
+                    if (typeof v === 'string' && v.toLowerCase().includes(term)) {
+                        matches.push(node);
+                        break;
+                    }
+                }
+                // dive deeper
+                for (const child of Object.values(node)) {
+                    recurse(child);
+                }
+            }
+        };
+        recurse(obj);
+        return matches;
     }
     // Helper to find nodes matching the search term
     findNodes(tree, term) {

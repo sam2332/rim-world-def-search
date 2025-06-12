@@ -12,7 +12,7 @@ import path from 'path';
 import * as fuzzy from 'fuzzy';
 import net from 'net';
 import { z } from 'zod';
-import { XMLParser } from 'fast-xml-parser';
+import { XMLParser, XMLBuilder } from 'fast-xml-parser';
 
 interface SearchResult {
   file: string;
@@ -194,33 +194,70 @@ class RimWorldDefSearchServer {
     return parentTree;
   }
 
-  // Update performSearch to build a pseudo-tree
+  private formatXml(xml: string): string {
+    const formattedXml = xml
+      .replace(/>(\s*)</g, '>\n<') // Add newlines between tags
+      .replace(/\s+\n/g, '\n') // Remove excess whitespace before newlines
+      .replace(/\n\s+/g, '\n') // Remove excess whitespace after newlines
+      .replace(/\n{2,}/g, '\n') // Remove multiple consecutive newlines
+      .trim();
+
+    return formattedXml;
+  }
+
+  // initialize parser + builder with attributes preserved
+  private parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
+  private builder = new XMLBuilder({ ignoreAttributes: false, attributeNamePrefix: '@_' });
+
   private async performSearch(searchTerm: string): Promise<SearchResult[]> {
-    const searchTerms = searchTerm.split(' ').filter(term => term.trim() !== '');
+    const lowerTerm = searchTerm.toLowerCase();
     const results: SearchResult[] = [];
 
     for (const data of this.indexedData) {
-      const lowerContent = data.content.toLowerCase();
-      let found = false;
-      let bestTree = '';
-      let bestPos = Infinity;
-      for (const term of searchTerms) {
-        const idx = lowerContent.indexOf(term.toLowerCase());
-        if (idx !== -1 && idx < bestPos) {
-          // Try to extract the full parent DOM tree
-          const tree = this.extractFullParentTree(data.content, term);
-          if (tree) {
-            found = true;
-            bestTree = tree;
-            bestPos = idx;
-          }
-        }
-      }
-      if (found && bestTree) {
-        results.push({ file: data.file, content: bestTree, relevance: 1 });
+      const jsonTree = this.parser.parse(data.content);
+      const nodes = this.findMatchingNodes(jsonTree, lowerTerm);
+
+      if (nodes.length) {
+        const snippetXml = this.builder.build(nodes[0]);
+        const formattedSnippetXml = this.formatXml(snippetXml);
+        results.push({
+          file: data.file,
+          content: formattedSnippetXml,
+          relevance: 1,
+        });
       }
     }
+
     return results;
+  }
+
+  // Recursively collect any object-nodes whose text or attribute values include term
+  private findMatchingNodes(obj: any, term: string): any[] {
+    const matches: any[] = [];
+    const recurse = (node: any) => {
+      if (node && typeof node === 'object') {
+        // check attributes
+        for (const key of Object.keys(node)) {
+          if (key.startsWith('@_') && String(node[key]).toLowerCase().includes(term)) {
+            matches.push(node);
+            break;
+          }
+        }
+        // check text values or nested objects
+        for (const [k, v] of Object.entries(node)) {
+          if (typeof v === 'string' && v.toLowerCase().includes(term)) {
+            matches.push(node);
+            break;
+          }
+        }
+        // dive deeper
+        for (const child of Object.values(node)) {
+          recurse(child);
+        }
+      }
+    };
+    recurse(obj);
+    return matches;
   }
 
   // Helper to find nodes matching the search term
@@ -259,12 +296,6 @@ class RimWorldDefSearchServer {
 
     return traverse(tree, '');
   }
-
-  // Initialize XML parser
-  private parser = new XMLParser({
-    ignoreAttributes: false,
-    attributeNamePrefix: '@_',
-  });
 
   // Build an in-RAM tree or minimal index of nodes
   private async buildXmlIndex(directory: string): Promise<Record<string, any>> {
