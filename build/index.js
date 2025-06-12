@@ -97,16 +97,21 @@ class RimWorldDefSearchServer {
                     .map((dirent) => path_1.default.join('C:/Program Files (x86)/Steam/steamapps/common/RimWorld/Mods', dirent.name))
                 : [];
             const directories = [...dlcDirectories, ...steamWorkshopMods, ...manuallyInstalledMods];
-            for (const directory of directories) {
+            const indexDirectory = (directory) => {
                 const files = fs_1.default.existsSync(directory) ? fs_1.default.readdirSync(directory) : [];
                 for (const file of files) {
                     const filePath = path_1.default.join(directory, file);
-                    const folderName = path_1.default.basename(directory);
-                    if (fs_1.default.existsSync(filePath) && fs_1.default.statSync(filePath).isFile() && file.endsWith('.xml')) {
+                    if (fs_1.default.existsSync(filePath) && fs_1.default.statSync(filePath).isDirectory()) {
+                        indexDirectory(filePath); // Recursive call for subdirectories
+                    }
+                    else if (fs_1.default.existsSync(filePath) && fs_1.default.statSync(filePath).isFile() && file.endsWith('.xml')) {
                         const content = fs_1.default.readFileSync(filePath, 'utf-8');
-                        this.indexedData.push({ file: `${folderName}/${filePath}`, content, relevance: 0 });
+                        this.indexedData.push({ file: `${filePath}`, content, relevance: 0 });
                     }
                 }
+            };
+            for (const directory of directories) {
+                indexDirectory(directory);
             }
             console.log(`Indexed ${this.indexedData.length} files.`);
         });

@@ -75,18 +75,23 @@ class RimWorldDefSearchServer {
 
     const directories = [...dlcDirectories, ...steamWorkshopMods, ...manuallyInstalledMods];
 
-    for (const directory of directories) {
+    const indexDirectory = (directory: string) => {
       const files = fs.existsSync(directory) ? fs.readdirSync(directory) : [];
 
       for (const file of files) {
         const filePath = path.join(directory, file);
-        const folderName = path.basename(directory);
 
-        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile() && file.endsWith('.xml')) {
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) {
+          indexDirectory(filePath); // Recursive call for subdirectories
+        } else if (fs.existsSync(filePath) && fs.statSync(filePath).isFile() && file.endsWith('.xml')) {
           const content = fs.readFileSync(filePath, 'utf-8');
-          this.indexedData.push({ file: `${folderName}/${filePath}`, content, relevance: 0 });
+          this.indexedData.push({ file: `${filePath}`, content, relevance: 0 });
         }
       }
+    };
+
+    for (const directory of directories) {
+      indexDirectory(directory);
     }
 
     console.log(`Indexed ${this.indexedData.length} files.`);
