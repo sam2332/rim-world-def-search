@@ -12,6 +12,7 @@ import path from 'path';
 import * as fuzzy from 'fuzzy';
 import net from 'net';
 import { z } from 'zod';
+import { XMLParser } from 'fast-xml-parser';
 
 interface SearchResult {
   file: string;
@@ -157,46 +158,135 @@ class RimWorldDefSearchServer {
       );
     });
   }
-  private async performSearch(searchTerm: string): Promise<SearchResult[]> {
-    const searchTerms = searchTerm.split(' ').filter(term => term.trim() !== '');
+  // Extracts the full parent DOM tree containing the search term
+  private extractFullParentTree(xml: string, searchTerm: string): string | null {
+    const lowerXml = xml.toLowerCase();
+    const lowerTerm = searchTerm.toLowerCase();
+    let idx = lowerXml.indexOf(lowerTerm);
+    if (idx === -1) return null;
 
-    const results = this.indexedData
-      .map((data) => {
-        const lines = data.content.split('\n');
-        let totalRelevance = 0;
-        let matchCount = 0;
-        const relatedTags: string[] = [];
+    // Find all parent nodes leading up to the root
+    const openTags: string[] = [];
+    const closeTags: string[] = [];
+    let pos = idx;
 
-        for (const term of searchTerms) {
-          const matches = fuzzy.filter(term, lines);
-          if (matches.length > 0) {
-            totalRelevance += matches.reduce((sum, match) => sum + match.score, 0) / matches.length;
-            matchCount++;
+    while (pos >= 0) {
+      const openTagMatch = lowerXml.lastIndexOf('<', pos);
+      const closeTagMatch = lowerXml.indexOf('>', openTagMatch);
 
-            // Extract related XML tags for each match
-            matches.forEach(match => {
-              const lineIndex = match.index;
-              const contextLines = lines.slice(Math.max(0, lineIndex - 5), Math.min(lines.length, lineIndex + 5));
-              const xmlSnippet = contextLines.join('\n');
-              relatedTags.push(xmlSnippet);
-            });
-          }
+      if (openTagMatch !== -1 && closeTagMatch !== -1) {
+        const tag = xml.substring(openTagMatch + 1, closeTagMatch).split(' ')[0];
+        if (!tag.startsWith('/')) {
+          openTags.push(tag);
+        } else {
+          closeTags.push(tag.substring(1));
         }
+      }
 
-        if (matchCount > 0) {
-          const multiTermBoost = searchTerms.length > 1 ? (matchCount / searchTerms.length) : 1;
-          const relevance = totalRelevance * multiTermBoost;
+      pos = openTagMatch - 1;
+    }
 
-          return { file: data.file, content: relatedTags.join('\n'), relevance };
-        }
+    // Build the full parent tree
+    const parentTree = openTags.reverse().map(tag => `<${tag}>`).join('') +
+      xml.substring(idx, xml.indexOf('</', idx) + closeTags.length) +
+      closeTags.map(tag => `</${tag}>`).join('');
 
-        return null;
-      })
-      .filter((result): result is SearchResult => result !== null);
-
-    return results.sort((a, b) => b.relevance - a.relevance);
+    return parentTree;
   }
 
+  // Update performSearch to build a pseudo-tree
+  private async performSearch(searchTerm: string): Promise<SearchResult[]> {
+    const searchTerms = searchTerm.split(' ').filter(term => term.trim() !== '');
+    const results: SearchResult[] = [];
+
+    for (const data of this.indexedData) {
+      const lowerContent = data.content.toLowerCase();
+      let found = false;
+      let bestTree = '';
+      let bestPos = Infinity;
+      for (const term of searchTerms) {
+        const idx = lowerContent.indexOf(term.toLowerCase());
+        if (idx !== -1 && idx < bestPos) {
+          // Try to extract the full parent DOM tree
+          const tree = this.extractFullParentTree(data.content, term);
+          if (tree) {
+            found = true;
+            bestTree = tree;
+            bestPos = idx;
+          }
+        }
+      }
+      if (found && bestTree) {
+        results.push({ file: data.file, content: bestTree, relevance: 1 });
+      }
+    }
+    return results;
+  }
+
+  // Helper to find nodes matching the search term
+  private findNodes(tree: any, term: string): string[] {
+    const nodes: string[] = [];
+
+    const traverse = (node: any, parentKey: string = '') => {
+      if (typeof node === 'object') {
+        for (const key in node) {
+          if (key.includes(term) || (typeof node[key] === 'string' && node[key].includes(term))) {
+            nodes.push(`${parentKey}/${key}`);
+          }
+          traverse(node[key], key);
+        }
+      }
+    };
+
+    traverse(tree);
+    return nodes;
+  }
+
+  // Helper to get parent node
+  private getParentNode(tree: any, node: string): string {
+    const traverse = (currentNode: any, parentNode: string): string => {
+      if (typeof currentNode === 'object') {
+        for (const key in currentNode) {
+          if (key === node) {
+            return parentNode;
+          }
+          const result = traverse(currentNode[key], key);
+          if (result) return result;
+        }
+      }
+      return '';
+    };
+
+    return traverse(tree, '');
+  }
+
+  // Initialize XML parser
+  private parser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: '@_',
+  });
+
+  // Build an in-RAM tree or minimal index of nodes
+  private async buildXmlIndex(directory: string): Promise<Record<string, any>> {
+    const index: Record<string, any> = {};
+
+    const files = fs.existsSync(directory) ? fs.readdirSync(directory) : [];
+
+    for (const file of files) {
+      const filePath = path.join(directory, file);
+
+      if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) {
+        const subIndex = await this.buildXmlIndex(filePath);
+        Object.assign(index, subIndex); // Merge subdirectory index
+      } else if (fs.existsSync(filePath) && fs.statSync(filePath).isFile() && file.endsWith('.xml')) {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const parsedXml = this.parser.parse(content);
+        index[filePath] = parsedXml; // Store parsed XML tree
+      }
+    }
+
+    return index;
+  }
 
   async run() {
     const transport = new StdioServerTransport();

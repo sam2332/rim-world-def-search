@@ -1,38 +1,5 @@
 #!/usr/bin/env node
 "use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -51,9 +18,8 @@ const stdio_js_1 = require("@modelcontextprotocol/sdk/server/stdio.js");
 const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
-const fuzzy = __importStar(require("fuzzy"));
-const net_1 = __importDefault(require("net"));
 const zod_1 = require("zod");
+const fast_xml_parser_1 = require("fast-xml-parser");
 // Define reusable schemas
 const SearchRequestSchema = zod_1.z.object({
     searchTerm: zod_1.z.string(),
@@ -76,6 +42,11 @@ const config = {
 class RimWorldDefSearchServer {
     constructor() {
         this.indexedData = [];
+        // Initialize XML parser
+        this.parser = new fast_xml_parser_1.XMLParser({
+            ignoreAttributes: false,
+            attributeNamePrefix: '@_',
+        });
         this.server = new index_js_1.Server({
             name: 'rimworld-def-search',
             version: '0.1.0',
@@ -168,59 +139,123 @@ class RimWorldDefSearchServer {
             throw new types_js_1.McpError(types_js_1.ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`);
         }));
     }
+    // Extracts the full parent DOM tree containing the search term
+    extractFullParentTree(xml, searchTerm) {
+        const lowerXml = xml.toLowerCase();
+        const lowerTerm = searchTerm.toLowerCase();
+        let idx = lowerXml.indexOf(lowerTerm);
+        if (idx === -1)
+            return null;
+        // Find all parent nodes leading up to the root
+        const openTags = [];
+        const closeTags = [];
+        let pos = idx;
+        while (pos >= 0) {
+            const openTagMatch = lowerXml.lastIndexOf('<', pos);
+            const closeTagMatch = lowerXml.indexOf('>', openTagMatch);
+            if (openTagMatch !== -1 && closeTagMatch !== -1) {
+                const tag = xml.substring(openTagMatch + 1, closeTagMatch).split(' ')[0];
+                if (!tag.startsWith('/')) {
+                    openTags.push(tag);
+                }
+                else {
+                    closeTags.push(tag.substring(1));
+                }
+            }
+            pos = openTagMatch - 1;
+        }
+        // Build the full parent tree
+        const parentTree = openTags.reverse().map(tag => `<${tag}>`).join('') +
+            xml.substring(idx, xml.indexOf('</', idx) + closeTags.length) +
+            closeTags.map(tag => `</${tag}>`).join('');
+        return parentTree;
+    }
+    // Update performSearch to build a pseudo-tree
     performSearch(searchTerm) {
         return __awaiter(this, void 0, void 0, function* () {
             const searchTerms = searchTerm.split(' ').filter(term => term.trim() !== '');
-            const results = this.indexedData
-                .map((data) => {
-                const lines = data.content.split('\n');
-                let totalRelevance = 0;
-                let matchCount = 0;
-                const relatedTags = [];
+            const results = [];
+            for (const data of this.indexedData) {
+                const lowerContent = data.content.toLowerCase();
+                let found = false;
+                let bestTree = '';
+                let bestPos = Infinity;
                 for (const term of searchTerms) {
-                    const matches = fuzzy.filter(term, lines);
-                    if (matches.length > 0) {
-                        totalRelevance += matches.reduce((sum, match) => sum + match.score, 0) / matches.length;
-                        matchCount++;
-                        // Extract related XML tags for each match
-                        matches.forEach(match => {
-                            const lineIndex = match.index;
-                            const contextLines = lines.slice(Math.max(0, lineIndex - 5), Math.min(lines.length, lineIndex + 5));
-                            const xmlSnippet = contextLines.join('\n');
-                            relatedTags.push(xmlSnippet);
-                        });
+                    const idx = lowerContent.indexOf(term.toLowerCase());
+                    if (idx !== -1 && idx < bestPos) {
+                        // Try to extract the full parent DOM tree
+                        const tree = this.extractFullParentTree(data.content, term);
+                        if (tree) {
+                            found = true;
+                            bestTree = tree;
+                            bestPos = idx;
+                        }
                     }
                 }
-                if (matchCount > 0) {
-                    const multiTermBoost = searchTerms.length > 1 ? (matchCount / searchTerms.length) : 1;
-                    const relevance = totalRelevance * multiTermBoost;
-                    return { file: data.file, content: relatedTags.join('\n'), relevance };
+                if (found && bestTree) {
+                    results.push({ file: data.file, content: bestTree, relevance: 1 });
                 }
-                return null;
-            })
-                .filter((result) => result !== null);
-            return results.sort((a, b) => b.relevance - a.relevance);
+            }
+            return results;
         });
     }
-    findAvailablePort(startPort) {
+    // Helper to find nodes matching the search term
+    findNodes(tree, term) {
+        const nodes = [];
+        const traverse = (node, parentKey = '') => {
+            if (typeof node === 'object') {
+                for (const key in node) {
+                    if (key.includes(term) || (typeof node[key] === 'string' && node[key].includes(term))) {
+                        nodes.push(`${parentKey}/${key}`);
+                    }
+                    traverse(node[key], key);
+                }
+            }
+        };
+        traverse(tree);
+        return nodes;
+    }
+    // Helper to get parent node
+    getParentNode(tree, node) {
+        const traverse = (currentNode, parentNode) => {
+            if (typeof currentNode === 'object') {
+                for (const key in currentNode) {
+                    if (key === node) {
+                        return parentNode;
+                    }
+                    const result = traverse(currentNode[key], key);
+                    if (result)
+                        return result;
+                }
+            }
+            return '';
+        };
+        return traverse(tree, '');
+    }
+    // Build an in-RAM tree or minimal index of nodes
+    buildXmlIndex(directory) {
         return __awaiter(this, void 0, void 0, function* () {
-            return new Promise((resolve) => {
-                const server = net_1.default.createServer();
-                server.listen(startPort, () => {
-                    server.close(() => resolve(startPort));
-                });
-                server.on('error', () => {
-                    resolve(this.findAvailablePort(startPort + 1));
-                });
-            });
+            const index = {};
+            const files = fs_1.default.existsSync(directory) ? fs_1.default.readdirSync(directory) : [];
+            for (const file of files) {
+                const filePath = path_1.default.join(directory, file);
+                if (fs_1.default.existsSync(filePath) && fs_1.default.statSync(filePath).isDirectory()) {
+                    const subIndex = yield this.buildXmlIndex(filePath);
+                    Object.assign(index, subIndex); // Merge subdirectory index
+                }
+                else if (fs_1.default.existsSync(filePath) && fs_1.default.statSync(filePath).isFile() && file.endsWith('.xml')) {
+                    const content = fs_1.default.readFileSync(filePath, 'utf-8');
+                    const parsedXml = this.parser.parse(content);
+                    index[filePath] = parsedXml; // Store parsed XML tree
+                }
+            }
+            return index;
         });
     }
     run() {
         return __awaiter(this, void 0, void 0, function* () {
             const transport = new stdio_js_1.StdioServerTransport();
             yield this.server.connect(transport);
-            const port = yield this.findAvailablePort(3000);
-            console.error(`RimWorld Def Search MCP server running on port ${port}`);
         });
     }
 }
