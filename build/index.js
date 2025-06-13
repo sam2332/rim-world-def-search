@@ -19,6 +19,7 @@ const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
 const fileIndex_1 = require("./utils/fileIndex");
 const searchXml_1 = require("./utils/searchXml");
 const fs_1 = __importDefault(require("fs"));
+const path_1 = __importDefault(require("path"));
 const zod_1 = require("zod");
 const zod_to_json_schema_1 = require("zod-to-json-schema");
 const SearchRequestSchema = zod_1.z.object({
@@ -98,12 +99,36 @@ class RimWorldDefSearchServer {
                     throw new types_js_1.McpError(types_js_1.ErrorCode.InvalidParams, parsedArgs.error.message);
                 }
                 const { searchTerm, limit } = parsedArgs.data;
+                // Check if search term is empty
+                if (!searchTerm || searchTerm.trim() === '') {
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: JSON.stringify({
+                                    error: "Please provide a search term. You can use spaces to search for multiple terms."
+                                }, null, 2),
+                            },
+                        ],
+                    };
+                }
                 const results = yield (0, searchXml_1.performSearch)(this.indexedData, searchTerm);
+                // Format the results to include helpful information
+                const formattedResults = results.slice(0, limit).map(result => {
+                    var _a;
+                    return Object.assign(Object.assign({}, result), { filename: path_1.default.basename(result.file), directory: path_1.default.dirname(result.file), matchedTerms: (_a = result.matchedTerms) === null || _a === void 0 ? void 0 : _a.join(', '), relevanceScore: result.relevance });
+                });
                 return {
                     content: [
                         {
                             type: 'text',
-                            text: JSON.stringify(results.slice(0, limit), null, 2),
+                            text: JSON.stringify({
+                                query: searchTerm,
+                                terms: searchTerm.split(' ').filter(t => t.length > 0),
+                                totalResults: results.length,
+                                displayedResults: formattedResults.length,
+                                results: formattedResults
+                            }, null, 2),
                         },
                     ],
                 };

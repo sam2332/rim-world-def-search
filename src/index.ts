@@ -93,19 +93,51 @@ class RimWorldDefSearchServer {
             },
           ],
         };
-      }
-      if (request.params.name === 'search') {
+      }      if (request.params.name === 'search') {
         const parsedArgs = SearchRequestSchema.safeParse(request.params.arguments);
         if (!parsedArgs.success) {
           throw new McpError(ErrorCode.InvalidParams, parsedArgs.error.message);
         }
         const { searchTerm, limit } = parsedArgs.data;
+        
+        // Check if search term is empty
+        if (!searchTerm || searchTerm.trim() === '') {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({ 
+                  error: "Please provide a search term. You can use spaces to search for multiple terms." 
+                }, null, 2),
+              },
+            ],
+          };
+        }
+        
         const results = await performSearch(this.indexedData, searchTerm);
+        
+        // Format the results to include helpful information
+        const formattedResults = results.slice(0, limit).map(result => {
+          return {
+            ...result,
+            filename: path.basename(result.file),
+            directory: path.dirname(result.file),
+            matchedTerms: result.matchedTerms?.join(', '),
+            relevanceScore: result.relevance,
+          };
+        });
+        
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(results.slice(0, limit), null, 2),
+              text: JSON.stringify({
+                query: searchTerm,
+                terms: searchTerm.split(' ').filter(t => t.length > 0),
+                totalResults: results.length,
+                displayedResults: formattedResults.length,
+                results: formattedResults
+              }, null, 2),
             },
           ],
         };
